@@ -6,14 +6,23 @@
 #include <sstream>
 #include <TlHelp32.h>
 #include <detours/detours.h>
+#include <nlohmann/json.hpp>
 
-int32_t g_current_score = 0;
+int32_t g_currentScore = 0;
+int32_t g_currentLife = 0;
 
 int32_t(__fastcall* OrigGetLostScore)(void* arg) = (int32_t(__fastcall*)(void*))0x00bee430;
 static int32_t __fastcall GetLostScore(void* arg)
 {
-      g_current_score = (*OrigGetLostScore)(arg);
-      return g_current_score;
+      g_currentScore = (*OrigGetLostScore)(arg);
+      return g_currentScore;
+}
+
+int32_t(__fastcall* OrigGetLifeRemaining)(void* arg) = (int32_t(__fastcall*)(void*))0x00bf77d0;
+static int32_t __fastcall GetLifeRemaining(void* arg)
+{
+      g_currentLife = (*OrigGetLifeRemaining)(arg);
+      return g_currentLife;
 }
 
 static uintptr_t GetModuleBaseAddress(DWORD64 procId, const wchar_t* modName)
@@ -44,7 +53,8 @@ static DWORD WINAPI Listen(LPVOID)
       auto addr1 = GetModuleBaseAddress(procID, L"chusanApp.exe") + 0x1EE6AF8;
       auto commaflag = false;
 
-      std::ostringstream oss;
+      std::vector<int32_t> scoreGraph;
+      std::vector<int32_t> lifeGraph;
       while (1) {
             auto gameplayread = *((std::uint32_t*)addr1);
 
@@ -54,33 +64,29 @@ static DWORD WINAPI Listen(LPVOID)
                   // Skip loading time, skill activation etc.
                   Sleep(12000);
 
-                  commaflag = false;
-                  oss << "{\n\t\"scoreGraph\": [\n\t\t";
+                  scoreGraph.clear();
+                  lifeGraph.clear();
             }
 
             if (gameplayread == 0 && gameplayflag == true) {
                   gameplayflag = false;
 
-                  oss << "\n\t]\n}";
-
                   std::ofstream ofs("score-" + std::to_string(time(nullptr)) + ".json");
-                  ofs << oss.str();
 
-                  oss.str(std::string{});
+                  nlohmann::json json;
+                  json["scoreGraph"] = scoreGraph;
+                  json["lifeGraph"] = lifeGraph;
+
+                  ofs << json;
             }
 
             if (gameplayflag == 0) {
                   Sleep(100);
             } else {
-                  auto val = 1010000 - g_current_score;
-                  if (commaflag) {
-                        oss << ", ";
-                  } else {
-                        commaflag = true;
-                  }
-                  oss << val;
+                  scoreGraph.push_back(1010000 - g_currentScore);
+                  lifeGraph.push_back(g_currentLife);
+                  Sleep(1000);
             }
-            Sleep(1000);
       }
       return 0;
 }
@@ -96,13 +102,25 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD dwReason, LPVOID reserved)
 
             DetourTransactionBegin();
             DetourUpdateThread(GetCurrentThread());
+
             auto rv = DetourAttach(&(PVOID&)OrigGetLostScore, GetLostScore);
             if (rv != NO_ERROR) {
-                  std::ofstream ofs("grapher.txt");
-                  ofs << "DetourAttach failed: " << rv << std::endl;
+                  std::ofstream ofs("grapher.log");
+                  ofs << "DetourAttach #1 failed: " << rv << std::endl;
                   return FALSE;
             }
-            DetourTransactionCommit();
+            rv = DetourAttach(&(PVOID&)OrigGetLifeRemaining, GetLifeRemaining);
+            if (rv != NO_ERROR) {
+                  std::ofstream ofs("grapher.log");
+                  ofs << "DetourAttach #2 failed: " << rv << std::endl;
+                  return FALSE;
+            }
+            rv = DetourTransactionCommit();
+            if (rv != NO_ERROR) {
+                  std::ofstream ofs("grapher.log");
+                  ofs << "DetourTransactionCommit failed: " << rv << std::endl;
+                  return FALSE;
+            }
 
             CreateThread(nullptr, 0, Listen, nullptr, 0, nullptr);
       }
